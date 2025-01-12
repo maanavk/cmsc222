@@ -4,7 +4,21 @@
 /*
 Completed + Tested:
 - ADDI
+- ADDIS
+- ADD
+- ADDS
 - SUBI
+- SUBIS
+- SUB
+- SUBS
+- AND
+- ANDS
+- ORR
+- EOR
+- MOVZ
+- CMP
+- CBZ
+- CBNZ
 - HLT
 */
 
@@ -18,6 +32,12 @@ defining globals
 
 uint32_t currinstr;
 void (*curr_func)(void); //can change this to a queue if needed for parallelism
+typedef enum ShiftType{
+  LSL = 0b00,
+  LSR = 0b01,
+  ASR = 0b10,
+  ROR = 0b11
+} ShiftType;
 
 void clear_flags(){
   NEXT_STATE.FLAG_C = 0;
@@ -37,6 +57,29 @@ int AddWithCarry(uint64_t operand1, uint64_t operand2, uint8_t carry_bit, uint8_
   *nzcv_mask |= (INT64_MAX - (int64_t)operand1 < (int64_t)operand2 + carry_bit && (int64_t)operand1 >= 0 ||
                   INT64_MIN - (int64_t)operand1 > (int64_t)operand2 + carry_bit && (int64_t)operand1 < 0? 0b0001 : 0b0000); //V flag
   return result;
+}
+
+uint64_t ShiftReg(uint16_t reg, ShiftType type, uint32_t amount){
+  //shifts a register and returns the shifted value
+  switch (type){
+    case (LSL):
+      return NEXT_STATE.REGS[reg] << amount;
+    case (LSR):
+      return (uint64_t)NEXT_STATE.REGS[reg] >> amount;
+    case (ASR):
+      return NEXT_STATE.REGS[reg] >> amount;
+    case (ROR):
+      return (NEXT_STATE.REGS[reg] >> amount) | ((NEXT_STATE.REGS[reg] & 0x1) << 63); 
+  }
+}
+
+uint64_t SignExtend(uint64_t input, uint8_t numbits){
+  if (input >> (numbits - 1) == 1){
+    return input | (UINT64_MAX << numbits);
+  }
+  else {
+    return input;
+  }
 }
 
 void fetch()
@@ -123,6 +166,13 @@ void op_EORI(){
   NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src_idx] ^ imm;
 }
 
+void op_MOVZ(){
+  //Not sure about the hw bits for now just did the simple implementation
+  int dst_idx = currinstr & 0x0000001F;
+  uint16_t imm = (currinstr & 0x001FFFE0) >> 5;
+  NEXT_STATE.REGS[dst_idx] = imm;
+}
+
 void data_proci(){
   //extract bits 25-23
   uint8_t decode_field = (currinstr & 0x03800000) >> 23;
@@ -150,7 +200,7 @@ void data_proci(){
       break;
     case (0b100):
       //Logic Immediate
-      //Apparently these aren't needed but I implemented them anyways
+      //Apparently these aren't needed but I accidentally implemented them anyways
       switch ((currinstr & 0xE0000000) >> 29){
         case (0b100):
           curr_func = op_ANDI;
@@ -165,6 +215,11 @@ void data_proci(){
       break;
     case (0b101):
       //Move Wide Immediate
+      switch ((currinstr & 0xE0000000) >> 29){
+        case (0b110):
+          curr_func = op_MOVZ;
+          break;
+      }
       break;
     case (0b110):
       //Bitfield
@@ -187,11 +242,25 @@ void op_HLT(){
   RUN_BIT = 0;
 }
 
+void op_CBZ(){
+  uint64_t imm = (currinstr & 0x00FFFFE0) >> 5;
+  imm = 4 * SignExtend(imm , 19);
+  int test_idx =(currinstr & 0x0000001F);
+  if (NEXT_STATE.REGS[test_idx] == 0) CURRENT_STATE.PC += imm - 4;
+}
+
+void op_CBNZ(){
+  uint64_t imm = (currinstr & 0x00FFFFE0) >> 5;
+  imm = 4 * SignExtend(imm, 19);
+  int test_idx = (currinstr & 0x0000001F);
+  if (NEXT_STATE.REGS[test_idx] != 0) CURRENT_STATE.PC += imm - 4;
+}
+
 void branch_exn(){
   uint8_t decode_field = (currinstr & (0xE0000000)) >> 29;
   switch (decode_field & 0b111){
     case (0b110):
-      switch ((currinstr & (0x03E00000)) >> 28){
+      switch ((currinstr & (0x03C00000)) >> 22){
         case (0b0000):
         case (0b0010):
         case (0b0001):
@@ -201,7 +270,25 @@ void branch_exn(){
             case (0x00400000):
               curr_func = op_HLT;
           }
-      } 
+        break;
+      }
+      break;
+    case (0b001):
+    case (0b101):
+      switch ((currinstr & 0x02000000) >> 25){
+        case (0x0):
+          switch ((currinstr & 0x01000000) >> 24){
+            case (0x0):
+              curr_func = op_CBZ;
+              break;
+            case (0x1):
+              curr_func = op_CBNZ;
+              break;
+          }
+          break;
+      }
+      break;
+
   }
 }
 
@@ -257,6 +344,50 @@ void op_SUB(){
   NEXT_STATE.REGS[dst_idx] = AddWithCarry(NEXT_STATE.REGS[src1_idx], -NEXT_STATE.REGS[src2_idx], 0, &_);
 }
 
+void op_AND(){
+  int src1_idx = (currinstr & 0x000003E0) >> 5; 
+  int dst_idx = currinstr & 0x0000001F;
+  int src2_idx = (currinstr & 0x001F0000) >> 16;
+  int imm6 = (currinstr & 0x0000FC00) >> 10;
+  int shift_type = (currinstr & 0x00C00000) >> 22;
+  uint64_t operand2 = ShiftReg(src2_idx, shift_type, imm6);
+  NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src1_idx] & operand2;
+}
+
+void op_ANDS(){
+  int src1_idx = (currinstr & 0x000003E0) >> 5; 
+  int dst_idx = currinstr & 0x0000001F;
+  int src2_idx = (currinstr & 0x001F0000) >> 16;
+  int imm6 = (currinstr & 0x0000FC00) >> 10;
+  int shift_type = (currinstr & 0x00C00000) >> 22;
+  uint64_t operand2 = ShiftReg(src2_idx, shift_type, imm6);
+  clear_flags();
+  NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src1_idx] & operand2;
+  NEXT_STATE.FLAG_N = (NEXT_STATE.REGS[dst_idx] < 0 ? 1 : 0);
+  NEXT_STATE.FLAG_Z = (NEXT_STATE.REGS[dst_idx] == 0 ? 1 : 0);
+}
+
+void op_ORR(){
+  int src1_idx = (currinstr & 0x000003E0) >> 5; 
+  int dst_idx = currinstr & 0x0000001F;
+  int src2_idx = (currinstr & 0x001F0000) >> 16;
+  int imm6 = (currinstr & 0x0000FC00) >> 10;
+  int shift_type = (currinstr & 0x00C00000) >> 22;
+  uint64_t operand2 = ShiftReg(src2_idx, shift_type, imm6);
+  NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src1_idx] | operand2;
+}
+
+void op_EOR(){
+  int src1_idx = (currinstr & 0x000003E0) >> 5; 
+  int dst_idx = currinstr & 0x0000001F;
+  int src2_idx = (currinstr & 0x001F0000) >> 16;
+  int imm6 = (currinstr & 0x0000FC00) >> 10;
+  int shift_type = (currinstr & 0x00C00000) >> 22;
+  uint64_t operand2 = ShiftReg(src2_idx, shift_type, imm6);
+  NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src1_idx] ^ operand2;
+}
+
+
 void data_procr(){
   uint8_t decode_field_1 = (currinstr & (0x40000000)) >> 30;
   uint8_t decode_field_2 = (currinstr & (0x10000000)) >> 28;
@@ -267,9 +398,23 @@ void data_procr(){
         case (0b0000):
         case (0b0001):
           //Logical, shifted register
+          switch ((currinstr & 0xE0200000) >> 20){
+            case (0x800):
+              curr_func = op_AND;
+              break;
+            case (0xA00):
+              curr_func = op_ORR;
+              break;
+            case (0xC00):
+              curr_func = op_EOR;
+              break;
+            case (0xE00):
+              curr_func = op_ANDS;
+              break;
+          }
           break;
         case (0b1000):
-          //Add/sub, shift register, for now just fall through I guess.
+          //Add/sub, shift register, just fall through.
         case (0b1001):
           //Add/sub, extended register
           switch ((currinstr & 0xE0C00000) >> 20){
@@ -334,7 +479,7 @@ void decode()
 void execute()
 {
   curr_func();
-  NEXT_STATE.PC += 4;
+  NEXT_STATE.PC = CURRENT_STATE.PC + 4;
   CURRENT_STATE = NEXT_STATE;
 }
 

@@ -19,6 +19,7 @@ Completed + Tested:
 - CMP
 - CBZ
 - CBNZ
+- B
 - HLT
 */
 
@@ -46,16 +47,17 @@ void clear_flags(){
   NEXT_STATE.FLAG_V = 0;
 }
 
-int AddWithCarry(uint64_t operand1, uint64_t operand2, uint8_t carry_bit, uint8_t* nzcv_mask){
+int AddWithCarry(int64_t operand1, int64_t operand2, uint8_t carry_bit, uint8_t* nzcv_mask){
   //Adds and returns flags. Flags returned as side effect. Function defined on page 6065
-  uint64_t u_sum = operand1 + operand2 + carry_bit;
+  //Note that I am a bit concerned about the safety of this function - specifically with the regards to the V flag. Might just remove it if it is not required.
+  uint64_t u_sum = (uint64_t)operand1 + (uint64_t)operand2 + carry_bit;
   uint64_t result = u_sum;
   *nzcv_mask = 0;
   *nzcv_mask |= (result >> 63 ? 0b1000 : 0b0000); //N flag
   *nzcv_mask |= (result == 0 ? 0b0100 : 0b0000); //Z flag
   *nzcv_mask |= (UINT64_MAX - operand1 < operand2 + carry_bit ? 0b0010 : 0b0000); //C flag
-  *nzcv_mask |= (INT64_MAX - (int64_t)operand1 < (int64_t)operand2 + carry_bit && (int64_t)operand1 >= 0 ||
-                  INT64_MIN - (int64_t)operand1 > (int64_t)operand2 + carry_bit && (int64_t)operand1 < 0? 0b0001 : 0b0000); //V flag
+  *nzcv_mask |= (INT64_MAX - operand1 < operand2 + carry_bit && operand1 >= 0 ||
+                  INT64_MIN - operand1 > operand2 + carry_bit && operand1 < 0? 0b0001 : 0b0000); //V flag
   return result;
 }
 
@@ -80,6 +82,39 @@ uint64_t SignExtend(uint64_t input, uint8_t numbits){
   else {
     return input;
   }
+}
+
+uint8_t ConditionHolds(uint8_t cond){
+  //the bgt bge and lt lte tests might be broken code seems to run fine from my tests but I don't know.
+  uint8_t result;
+  printf("N: %d, V: %d \n", CURRENT_STATE.FLAG_N, CURRENT_STATE.FLAG_V);
+  switch (cond >> 1){
+    case (0b000):
+      result = CURRENT_STATE.FLAG_Z;
+      break;
+    case (0b001):
+      result = CURRENT_STATE.FLAG_C;
+      break;
+    case (0b010):
+      result = CURRENT_STATE.FLAG_N;
+      break;
+    case (0b011):
+      result = CURRENT_STATE.FLAG_V;
+      break;
+    case (0b100):
+      result = ((CURRENT_STATE.FLAG_C == 1) && (CURRENT_STATE.FLAG_Z == 0));
+      break;
+    case (0b101):
+      result = (CURRENT_STATE.FLAG_N == CURRENT_STATE.FLAG_V);
+      break;
+    case (0b110):
+      result = ((CURRENT_STATE.FLAG_N == CURRENT_STATE.FLAG_V) && (CURRENT_STATE.FLAG_Z == 0));
+      printf("res: %d \n", result);
+      break;
+    case (0b111):
+      return TRUE;
+  }
+  return ((cond & 0b1)? !result : result);
 }
 
 void fetch()
@@ -250,15 +285,42 @@ void op_CBZ(){
 }
 
 void op_CBNZ(){
+  //maybe test sign extension
   uint64_t imm = (currinstr & 0x00FFFFE0) >> 5;
   imm = 4 * SignExtend(imm, 19);
   int test_idx = (currinstr & 0x0000001F);
   if (NEXT_STATE.REGS[test_idx] != 0) CURRENT_STATE.PC += imm - 4;
 }
 
+void op_B(){
+  uint64_t imm = (currinstr & 0x03FFFFFF);
+  imm = 4 * SignExtend(imm, 26);
+  CURRENT_STATE.PC += imm - 4;
+}
+
+void op_Bcond(){
+  uint64_t imm = (currinstr & 0x00FFFFE0) >> 5;
+  imm = 4 * SignExtend(imm, 19);
+  uint8_t cond = (currinstr & 0x0000000F);
+  if (ConditionHolds(cond)){
+    CURRENT_STATE.PC += imm - 4;
+  }
+}
+
 void branch_exn(){
   uint8_t decode_field = (currinstr & (0xE0000000)) >> 29;
   switch (decode_field & 0b111){
+    case (0b010):
+      if (((currinstr & 0x03000010) == 0x0)){
+        curr_func = op_Bcond;
+      }
+      break;
+    case (0b100):
+      //op_BL
+      break;
+    case (0b000):
+      curr_func = op_B;
+      break;
     case (0b110):
       switch ((currinstr & (0x03C00000)) >> 22){
         case (0b0000):
@@ -480,6 +542,7 @@ void execute()
 {
   curr_func();
   NEXT_STATE.PC = CURRENT_STATE.PC + 4;
+  NEXT_STATE.REGS[31] = 0; //dirty fix to avoid the edge case I don't know how wise this is
   CURRENT_STATE = NEXT_STATE;
 }
 

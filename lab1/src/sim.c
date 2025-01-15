@@ -20,6 +20,8 @@ Completed + Tested:
 - CBZ
 - CBNZ
 - B
+- LDUR
+- STUR
 - HLT
 */
 
@@ -75,7 +77,7 @@ uint64_t ShiftReg(uint16_t reg, ShiftType type, uint32_t amount){
   }
 }
 
-uint64_t SignExtend(uint64_t input, uint8_t numbits){
+int64_t SignExtend(uint64_t input, uint8_t numbits){
   if (input >> (numbits - 1) == 1){
     return input | (UINT64_MAX << numbits);
   }
@@ -499,6 +501,79 @@ void data_procr(){
   }
 }
 
+/*
+--------------------------------------------------------------------------------
+
+Begin Load/Store 
+
+--------------------------------------------------------------------------------
+*/
+
+void op_STUR(){
+  uint32_t to_idx = (currinstr & 0x000003E0) >> 5; 
+  uint32_t from_idx = currinstr & 0x0000001F;
+  uint64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  mem_write_32(CURRENT_STATE.REGS[to_idx] + imm9, (uint32_t)CURRENT_STATE.REGS[from_idx]);
+}
+
+void op_LDUR(){
+  uint32_t src_idx = (currinstr & 0x000003E0) >> 5; 
+  uint32_t dst_idx = currinstr & 0x0000001F;
+  uint64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  NEXT_STATE.REGS[dst_idx] = mem_read_32(CURRENT_STATE.REGS[src_idx] + imm9); //I think C implicitly zero extends so this is fine?
+}
+
+void load_store_uimm(){
+  uint8_t size = (currinstr & (0xC0000000)) >> 30;
+  uint8_t v = (currinstr & (0x04000000)) >> 26;
+  uint8_t opc = (currinstr & 0x00C00000) >> 22;
+  switch (size){
+    case (0b11):
+      switch (v){
+        case (0b0):
+          switch (opc){
+            case (0b00):
+              curr_func = op_STUR;
+              break;
+            case (0b01):
+              curr_func = op_LDUR;
+              break;
+          }
+          break;
+      }
+      break;
+  }
+
+}
+
+void load_store(){
+  uint8_t op1 = (currinstr & (0x30000000)) >> 28;
+  uint8_t op3 = (currinstr & (0x01800000)) >> 23;
+  uint8_t op4 = (currinstr & (0x003F0000)) >> 16;
+  uint8_t op5 = (currinstr & (0x00000C00)) >> 10;
+  switch (op1){
+    case (0b11):
+      switch (op3){
+        case (0b01):
+        case (0b00):
+          switch (op4 >> 5){
+            case (0b0):
+              switch (op5){
+                case (0b00):
+                  //load/store unscaled immediate
+                  load_store_uimm();
+                  break;
+              }
+              break;
+          }
+        break;
+      }
+    break;
+  }
+}
+
 void decode()
 {
   //first, extract bits 28 - 25
@@ -532,6 +607,7 @@ void decode()
         case (0b0100):
         case (0b0110):
           //Loads and stores
+          load_store();
           break;
       }
       break;

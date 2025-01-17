@@ -111,7 +111,6 @@ uint8_t ConditionHolds(uint8_t cond){
       break;
     case (0b110):
       result = ((CURRENT_STATE.FLAG_N == CURRENT_STATE.FLAG_V) && (CURRENT_STATE.FLAG_Z == 0));
-      printf("res: %d \n", result);
       break;
     case (0b111):
       return TRUE;
@@ -210,6 +209,20 @@ void op_MOVZ(){
   NEXT_STATE.REGS[dst_idx] = imm;
 }
 
+void op_UBFM(){
+  uint8_t imms = (currinstr & 0x0000FC00) >> 10;
+  uint8_t immr = (currinstr & 0x003F0000) >> 16;
+  int Rd = (currinstr & 0x0000001F);
+  int Rn = (currinstr & 0x000003E0) >> 5;
+  uint64_t src = CURRENT_STATE.REGS[Rn];
+  if (imms == 0b111111){
+    NEXT_STATE.REGS[Rd] = src >> immr;
+  }
+  else{
+    NEXT_STATE.REGS[Rd] = src << -immr;
+  }
+}
+
 void data_proci(){
   //extract bits 25-23
   uint8_t decode_field = (currinstr & 0x03800000) >> 23;
@@ -260,6 +273,11 @@ void data_proci(){
       break;
     case (0b110):
       //Bitfield
+      switch ((currinstr & 0xE0000000) >> 29){
+        case (0b110):
+          curr_func = op_UBFM; //this gives us lsl and lsr
+          break;
+      }
       break;
     case (0b111):
       //extract
@@ -300,6 +318,11 @@ void op_B(){
   CURRENT_STATE.PC += imm - 4;
 }
 
+void op_BR(){
+  int src_idx = (currinstr & 0x000003E0) >> 5;
+  CURRENT_STATE.PC = CURRENT_STATE.REGS[src_idx] - 4; // this is pretty stupid, will consider making the jumping logic more sensible later instead of taking from the current always
+}
+
 void op_Bcond(){
   uint64_t imm = (currinstr & 0x00FFFFE0) >> 5;
   imm = 4 * SignExtend(imm, 19);
@@ -333,7 +356,13 @@ void branch_exn(){
           switch((currinstr & 0x00E0001F)){
             case (0x00400000):
               curr_func = op_HLT;
+              break;
           }
+          break;
+        case (0b1000):
+          //I will just let it fall through to br...
+          curr_func = op_BR;
+          break;
         break;
       }
       break;
@@ -451,12 +480,25 @@ void op_EOR(){
   NEXT_STATE.REGS[dst_idx] = NEXT_STATE.REGS[src1_idx] ^ operand2;
 }
 
+void op_MADD(){
+  int src1_idx = (currinstr & 0x000003E0) >> 5; 
+  int dst_idx = currinstr & 0x0000001F;
+  int src2_idx = (currinstr & 0x001F0000) >> 16;
+  NEXT_STATE.REGS[dst_idx] = CURRENT_STATE.REGS[src1_idx] * CURRENT_STATE.REGS[src2_idx];
+}
 
 void data_procr(){
   uint8_t decode_field_1 = (currinstr & (0x40000000)) >> 30;
   uint8_t decode_field_2 = (currinstr & (0x10000000)) >> 28;
   uint8_t decode_field_3 = (currinstr & (0x01E00000)) >> 21;
   switch (decode_field_2){
+    case (0x1):
+      switch (decode_field_3 & 0x8){
+        case (0x8):
+          curr_func = op_MADD; //I got lazy this can be decoded more but its fine
+          break;
+      }
+      break;
     case (0x0):
       switch (decode_field_3 & 0b1001){
         case (0b0000):
@@ -512,7 +554,7 @@ Begin Load/Store
 void op_STUR(){
   uint32_t to_idx = (currinstr & 0x000003E0) >> 5; 
   uint32_t from_idx = currinstr & 0x0000001F;
-  uint64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
   imm9 = SignExtend(imm9, 9);
   mem_write_32(CURRENT_STATE.REGS[to_idx] + imm9, (uint32_t)CURRENT_STATE.REGS[from_idx]);
 }
@@ -520,9 +562,43 @@ void op_STUR(){
 void op_LDUR(){
   uint32_t src_idx = (currinstr & 0x000003E0) >> 5; 
   uint32_t dst_idx = currinstr & 0x0000001F;
-  uint64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
   imm9 = SignExtend(imm9, 9);
   NEXT_STATE.REGS[dst_idx] = mem_read_32(CURRENT_STATE.REGS[src_idx] + imm9); //I think C implicitly zero extends so this is fine?
+}
+
+void op_STURB(){
+  uint32_t Rn = (currinstr & 0x000003E0) >> 5; 
+  uint32_t Rt = currinstr & 0x0000001F;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  uint64_t address = CURRENT_STATE.REGS[Rn] + imm9;
+  mem_write_32(address, (uint8_t) CURRENT_STATE.REGS[Rt]);
+}
+
+void op_LDURB(){
+  uint32_t src_idx = (currinstr & 0x000003E0) >> 5; 
+  uint32_t dst_idx = currinstr & 0x0000001F;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  NEXT_STATE.REGS[dst_idx] = (uint8_t) mem_read_32(CURRENT_STATE.REGS[src_idx] + imm9); 
+}
+
+void op_STURH(){
+  uint32_t Rn = (currinstr & 0x000003E0) >> 5; 
+  uint32_t Rt = currinstr & 0x0000001F;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  uint64_t address = CURRENT_STATE.REGS[Rn] + imm9;
+  mem_write_32(address, (uint16_t) CURRENT_STATE.REGS[Rt]);
+}
+
+void op_LDURH(){
+  uint32_t src_idx = (currinstr & 0x000003E0) >> 5; 
+  uint32_t dst_idx = currinstr & 0x0000001F;
+  int64_t imm9 = (currinstr & 0x001FF000) >> 12;
+  imm9 = SignExtend(imm9, 9);
+  NEXT_STATE.REGS[dst_idx] = (uint16_t) mem_read_32(CURRENT_STATE.REGS[src_idx] + imm9); 
 }
 
 void load_store_uimm(){
@@ -530,6 +606,25 @@ void load_store_uimm(){
   uint8_t v = (currinstr & (0x04000000)) >> 26;
   uint8_t opc = (currinstr & 0x00C00000) >> 22;
   switch (size){
+    case (0b00):
+      switch (opc){
+        case (0b00):
+          curr_func = op_STURB;
+          break;
+        case (0b01):
+          curr_func = op_LDURB;
+          break;
+      }
+      break;
+    case (0b01):
+      switch (opc){
+        case (0b00):
+          curr_func = op_STURH;
+          break;
+        case (0b01):
+          curr_func = op_LDURH;
+          break;
+      }
     case (0b11):
       switch (v){
         case (0b0):
